@@ -1,0 +1,22 @@
+Validation date: 2026-11-11 (Asia/Bangkok)
+
+PASS: Python syntax compilation and command-line help.
+PASS: Invalid confidence values rejected before model import.
+PASS: Both source variants load the included best_inspec.pt and run synthetic
+      inference + result.plot() in the existing Windows Python 3.10 environment
+      with NumPy 1.26.4, torch 1.13.1+cu116, OpenCV 4.10.0, ultralytics 8.4.60.
+      Windows variant used CUDA; Mac variant's CPU path was exercised on Windows.
+PASS: Mac shell scripts pass bash -n using Git Bash on Windows.
+PASS: PyPI lists Python 3.12-compatible wheels for all explicitly pinned primary
+      packages on Windows x64, Mac arm64 and Mac Intel; see wheel_availability.json.
+PASS: Bundled model SHA256 matches source; ZIP CRC and model hash verified.
+
+NOT VERIFIED: installation in fresh Python 3.12 environments on either OS.
+NOT VERIFIED: execution, camera permissions, GUI or MPS on a physical Mac.
+NOT VERIFIED: packaged GUI loop on Windows; synthetic checks do not open a camera.
+NOT VERIFIED: model accuracy on a labelled test set.
+Dependency resolver dry-runs were stopped during large-wheel downloads; binary
+availability checks are not a complete dependency installation test.
+
+INSTALL scripts perform pip check and real model --check on the target machine.
+INSTALL COMPLETE is printed only after both checks pass.

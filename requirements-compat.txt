@@ -1,0 +1,2 @@
+# Local compatibility override; PyTorch/CUDA are inherited from Python 3.10.
+numpy==1.26.4

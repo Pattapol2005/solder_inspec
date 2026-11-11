@@ -1,0 +1,97 @@
+[
+  {
+    "package": "numpy",
+    "version": "1.26.4",
+    "matches": {
+      "cp312-cp312-win_amd64": [
+        "numpy-1.26.4-cp312-cp312-win_amd64.whl"
+      ],
+      "cp312-cp312-macosx_11_0_arm64": [
+        "numpy-1.26.4-cp312-cp312-macosx_11_0_arm64.whl"
+      ],
+      "cp312-cp312-macosx_10_9_x86_64": [
+        "numpy-1.26.4-cp312-cp312-macosx_10_9_x86_64.whl"
+      ]
+    },
+    "passed": true,
+    "source": "https://pypi.org/pypi/numpy/1.26.4/json"
+  },
+  {
+    "package": "opencv-python",
+    "version": "4.10.0.84",
+    "matches": {
+      "abi3-win_amd64": [
+        "opencv_python-4.10.0.84-cp37-abi3-win_amd64.whl"
+      ],
+      "abi3-macosx_11_0_arm64": [
+        "opencv_python-4.10.0.84-cp37-abi3-macosx_11_0_arm64.whl"
+      ],
+      "abi3-macosx_12_0_x86_64": [
+        "opencv_python-4.10.0.84-cp37-abi3-macosx_12_0_x86_64.whl"
+      ]
+    },
+    "passed": true,
+    "source": "https://pypi.org/pypi/opencv-python/4.10.0.84/json"
+  },
+  {
+    "package": "torch",
+    "version": "2.5.1",
+    "matches": {
+      "cp312-cp312-win_amd64": [
+        "torch-2.5.1-cp312-cp312-win_amd64.whl"
+      ],
+      "cp312-none-macosx_11_0_arm64": [
+        "torch-2.5.1-cp312-none-macosx_11_0_arm64.whl"
+      ]
+    },
+    "passed": true,
+    "source": "https://pypi.org/pypi/torch/2.5.1/json"
+  },
+  {
+    "package": "torchvision",
+    "version": "0.20.1",
+    "matches": {
+      "cp312-cp312-win_amd64": [
+        "torchvision-0.20.1-cp312-cp312-win_amd64.whl"
+      ],
+      "cp312-cp312-macosx_11_0_arm64": [
+        "torchvision-0.20.1-cp312-cp312-macosx_11_0_arm64.whl"
+      ]
+    },
+    "passed": true,
+    "source": "https://pypi.org/pypi/torchvision/0.20.1/json"
+  },
+  {
+    "package": "torch",
+    "version": "2.2.2",
+    "matches": {
+      "cp312-none-macosx_10_9_x86_64": [
+        "torch-2.2.2-cp312-none-macosx_10_9_x86_64.whl"
+      ]
+    },
+    "passed": true,
+    "source": "https://pypi.org/pypi/torch/2.2.2/json"
+  },
+  {
+    "package": "torchvision",
+    "version": "0.17.2",
+    "matches": {
+      "cp312-cp312-macosx_10_13_x86_64": [
+        "torchvision-0.17.2-cp312-cp312-macosx_10_13_x86_64.whl"
+      ]
+    },
+    "passed": true,
+    "source": "https://pypi.org/pypi/torchvision/0.17.2/json"
+  },
+  {
+    "package": "ultralytics",
+    "version": "8.4.60",
+    "matches": {
+      "py3-none-any": [
+        "ultralytics-8.4.60-py3-none-any.whl"
+      ]
+    },
+    "passed": true,
+    "source": "https://pypi.org/pypi/ultralytics/8.4.60/json"
+  }
+]
