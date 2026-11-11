@@ -42,3 +42,4 @@ Python หลักตัวเดิมยังใช้ NumPy 2.2.6 และ
 NumPy อธิบายปัญหา binary compatibility และวิธีใช้ `numpy<2` ที่:
 https://numpy.org/doc/2.0/user/troubleshooting-importerror.html
 "# solder_inspec" 
+"# solder_inspec" 
