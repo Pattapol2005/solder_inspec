@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [ValidateSet('Auto', 'CPU', 'CUDA')][string]$Acceleration = 'Auto',
-    [switch]$CheckOnly
+    [switch]$CheckOnly,
+    [switch]$ModelsOnly
 )
 
 # Compatible with Windows PowerShell 5.1. Python is not required to start setup.
@@ -141,6 +142,113 @@ function Get-AccelerationMode {
     return 'CPU'
 }
 
+function Get-ModelManifest {
+    $path = Join-Path $script:ProjectRoot 'models.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'models.json is missing. Download the complete project folder and run INSTALL.bat again.' }
+    $manifest = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($manifest.schema_version -ne 1) { throw 'Unsupported models.json format.' }
+    $expected = @('best_inspec.pt', 'best_locator.pt')
+    $files = @($manifest.files)
+    if ($files.Count -ne 2 -or @(Compare-Object $expected @($files | ForEach-Object { $_.name })).Count -ne 0) {
+        throw 'models.json must contain best_inspec.pt and best_locator.pt exactly once.'
+    }
+    foreach ($model in $files) {
+        $url = $null
+        if (-not [Uri]::TryCreate([string]$model.url, [UriKind]::Absolute, [ref]$url) -or $url.Scheme -ne 'https' -or $url.UserInfo) {
+            throw "Model download must use an HTTPS link without credentials: $($model.name)"
+        }
+        if ([string]$model.sha256 -notmatch '^[a-fA-F0-9]{64}$' -or [long]$model.size -le 0 -or [long]$model.size -gt 2GB) {
+            throw "Invalid expected model size or SHA256: $($model.name)"
+        }
+    }
+    return $files
+}
+
+function Receive-ModelFile([string]$Url, [string]$Destination, [long]$ExpectedSize) {
+    # Stream large weights directly to disk. Windows PowerShell 5.1's web
+    # cmdlet can buffer a large response and appear stalled with zero bytes.
+    Add-Type -AssemblyName System.Net.Http
+    $client = [Net.Http.HttpClient]::new()
+    $client.Timeout = [TimeSpan]::FromSeconds(600)
+    $client.DefaultRequestHeaders.UserAgent.ParseAdd('SolderInspector-Installer/1.0')
+    $cancel = [Threading.CancellationTokenSource]::new()
+    $cancel.CancelAfter(600000)
+    $response = $null
+    $inputStream = $null
+    $outputStream = $null
+    try {
+        $response = $client.GetAsync($Url, [Net.Http.HttpCompletionOption]::ResponseHeadersRead, $cancel.Token).GetAwaiter().GetResult()
+        $response.EnsureSuccessStatusCode() | Out-Null
+        $inputStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $outputStream = [IO.File]::Open($Destination, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $buffer = [byte[]]::new(1MB)
+        [long]$received = 0
+        [long]$nextNotice = 16MB
+        while ($true) {
+            $count = $inputStream.ReadAsync($buffer, 0, $buffer.Length, $cancel.Token).GetAwaiter().GetResult()
+            if ($count -eq 0) { break }
+            $outputStream.Write($buffer, 0, $count)
+            $received += $count
+            if ($received -gt $ExpectedSize) { throw 'Download is larger than the expected model size.' }
+            if ($received -ge $nextNotice) {
+                Write-Host ('  {0:N1} / {1:N1} MiB' -f ($received / 1MB), ($ExpectedSize / 1MB))
+                $nextNotice = $received + 16MB
+            }
+        }
+    } finally {
+        if ($outputStream) { $outputStream.Dispose() }
+        if ($inputStream) { $inputStream.Dispose() }
+        if ($response) { $response.Dispose() }
+        $client.Dispose()
+        $cancel.Dispose()
+    }
+}
+
+function Install-Models([string]$DownloadDirectory) {
+    foreach ($model in @(Get-ModelManifest)) {
+        $destination = Join-Path $script:ProjectRoot $model.name
+        if (Test-Path -LiteralPath $destination) {
+            if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) { throw "A directory is blocking model installation: $destination" }
+            $size = (Get-Item -LiteralPath $destination).Length
+            if ($size -eq [long]$model.size -and (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -eq $model.sha256) {
+                Write-Host "Model already installed: $($model.name)"
+            } else {
+                # The operator may have replaced the release with newer trained
+                # weights. Preserve them; Test-Installation validates their use.
+                Write-Host "Keeping existing custom model: $($model.name). Rename it if you want to download the bundled model."
+            }
+            continue
+        }
+        # Stage beside the destination so the final move stays on one volume.
+        $partial = Join-Path $script:ProjectRoot ('.model-download-' + [guid]::NewGuid().ToString('N') + '.pt')
+        $verified = $false
+        try {
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+                Write-Host ('Downloading {0} ({1:N1} MiB), attempt {2}/3...' -f $model.name, ([long]$model.size / 1MB), $attempt)
+                $oldProgress = $ProgressPreference
+                try {
+                    $ProgressPreference = 'SilentlyContinue'
+                    Receive-ModelFile $model.url $partial ([long]$model.size)
+                    if ((Get-Item -LiteralPath $partial).Length -ne [long]$model.size) { throw 'Downloaded file size does not match the manifest.' }
+                    if ((Get-FileHash -LiteralPath $partial -Algorithm SHA256).Hash -ne $model.sha256) { throw 'Downloaded file SHA256 does not match the manifest.' }
+                    $verified = $true
+                    break
+                } catch {
+                    if ($attempt -eq 3) { throw "Could not download $($model.name). Check the internet connection and run INSTALL.bat again. $($_.Exception.Message)" }
+                    Write-Host "Download incomplete; retrying $($model.name)..."
+                } finally { $ProgressPreference = $oldProgress }
+            }
+            if (-not $verified) { throw "Model verification failed: $($model.name)" }
+            # Install only a complete verified file. Do not overwrite a local model
+            # if another program created it while the download was in progress.
+            Move-Item -LiteralPath $partial -Destination $destination -ErrorAction Stop
+            Write-Host "Model verified and installed: $($model.name)"
+        } finally {
+            if (Test-Path -LiteralPath $partial) { Remove-Item -LiteralPath $partial -Force }
+        }
+    }
+}
+
 function Test-Installation {
     if (-not (Test-CompatiblePython $script:EnvironmentPython)) { throw 'Project Python is missing or unsupported. Run INSTALL.bat first.' }
     Invoke-ProjectPython @('-m', 'pip', 'check')
@@ -169,7 +277,7 @@ for name, loader in [('best_inspec.pt', load_weights), ('best_locator.pt', load_
         print('Model OK:', name, '| classes:', len(mapping))
         del model
     else:
-        print('Model missing:', name, '- copy your trained model into this folder before inspection')
+        raise FileNotFoundError(f'Model missing: {name}. Run INSTALL.bat to download the models.')
 print('Installation checks passed.')
 '@
     Invoke-PythonCode $script:EnvironmentPython $validation
@@ -177,6 +285,7 @@ print('Installation checks passed.')
 }
 
 function Install-SolderInspector {
+    if ($CheckOnly -and $ModelsOnly) { throw 'Choose either -CheckOnly or -ModelsOnly.' }
     if (-not [Environment]::Is64BitOperatingSystem -or $env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
         throw 'This installer supports Windows x64 (Intel/AMD).'
     }
@@ -195,6 +304,11 @@ function Install-SolderInspector {
         Write-Host "Project: $script:ProjectRoot"
         $downloadDirectory = Join-Path ([IO.Path]::GetTempPath()) ('solder-setup-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $downloadDirectory | Out-Null
+        if ($ModelsOnly) {
+            Install-Models $downloadDirectory
+            Write-Host 'Model files are ready.' -ForegroundColor Green
+            return
+        }
         $python = Find-CompatiblePython
         if (-not $python) { $python = Install-ProjectPython $downloadDirectory }
         Write-Host "Python: $python"
@@ -207,6 +321,7 @@ function Install-SolderInspector {
         Write-Host "AI package: PyTorch 2.8.0 ($mode)"
         Invoke-ProjectPython @('-m', 'pip', 'install', '--retries', '5', '--timeout', '120', "torch==2.8.0+$flavor", "torchvision==0.23.0+$flavor", '--index-url', "https://download.pytorch.org/whl/$flavor")
         Invoke-ProjectPython @('-m', 'pip', 'install', '--retries', '5', '--timeout', '60', '-r', (Join-Path $script:ProjectRoot 'requirements-ai.txt'))
+        Install-Models $downloadDirectory
         Test-Installation
         Write-Host ''
         Write-Host 'Setup complete. Double-click start.bat to open Solder Inspector.' -ForegroundColor Green

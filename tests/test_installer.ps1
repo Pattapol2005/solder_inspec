@@ -37,13 +37,14 @@ Assert-True ($quoted -eq 'quotes and spaces survive Windows PowerShell') 'Preser
 
 # Test installer orchestration in an isolated directory. Network downloads,
 # native installers and pip are replaced so these cases cannot change Windows.
-foreach ($case in @('FreshCPU', 'ExistingCUDA', 'Failure')) {
+foreach ($case in @('FreshCPU', 'ExistingCUDA', 'ModelsOnly', 'Failure')) {
     & {
         $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('solder-installer-test-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $testRoot | Out-Null
         $script:ProjectRoot = $testRoot
         $script:EnvironmentPython = Join-Path $testRoot '.venv\Scripts\python.exe'
         $script:Calls = [Collections.Generic.List[string]]::new()
+        $ModelsOnly = $case -eq 'ModelsOnly'
         function Find-CompatiblePython { if ($case -eq 'ExistingCUDA') { return 'mock-python.exe' }; return $null }
         function Install-ProjectPython([string]$DownloadDirectory) { $script:Calls.Add('install-python'); return 'mock-python.exe' }
         function Install-VCRuntime([string]$DownloadDirectory) { $script:Calls.Add('vc-runtime') }
@@ -54,6 +55,7 @@ foreach ($case in @('FreshCPU', 'ExistingCUDA', 'Failure')) {
             if ($case -eq 'Failure') { throw 'Simulated pip failure' }
         }
         function Test-Installation { $script:Calls.Add('verified') }
+        function Install-Models([string]$DownloadDirectory) { $script:Calls.Add('models') }
         $before = (Get-Location).Path
         try {
             $failed = $false
@@ -62,8 +64,11 @@ foreach ($case in @('FreshCPU', 'ExistingCUDA', 'Failure')) {
             Assert-True ((Get-Location).Path -eq $before) "$case restores working directory"
             if ($case -eq 'Failure') {
                 Assert-True (-not $script:Calls.Contains('verified')) 'Do not report success after a pip failure'
+            } elseif ($case -eq 'ModelsOnly') {
+                Assert-True ($script:Calls.Count -eq 1 -and $script:Calls.Contains('models')) 'Models-only mode does not install Python or libraries'
             } else {
                 Assert-True ($script:Calls.Contains('verified')) "$case verifies after installation"
+                Assert-True ($script:Calls.IndexOf('models') -ge 0 -and $script:Calls.IndexOf('models') -lt $script:Calls.IndexOf('verified')) "$case downloads models before verification"
                 Assert-True (($script:Calls.Contains('install-python')) -eq ($case -eq 'FreshCPU')) "$case installs Python only when missing"
                 $flavor = if ($case -eq 'ExistingCUDA') { 'cu128' } else { 'cpu' }
                 Assert-True (@($script:Calls | Where-Object { $_ -match "torch==2.8.0\+$flavor" -and $_ -match "https://download.pytorch.org/whl/$flavor" }).Count -eq 1) "$case uses the requested official PyTorch build"

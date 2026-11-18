@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "release": "https://github.com/Pattapol2005/solder_inspec/releases/tag/models-v1",
+  "files": [
+    {
+      "name": "best_inspec.pt",
+      "url": "https://github.com/Pattapol2005/solder_inspec/releases/download/models-v1/best_inspec.pt",
+      "size": 141534825,
+      "sha256": "6258afb634d74d366cc1007a1bf7784dcd2ede79f6344c20d4e89c0aa9593304"
+    },
+    {
+      "name": "best_locator.pt",
+      "url": "https://github.com/Pattapol2005/solder_inspec/releases/download/models-v1/best_locator.pt",
+      "size": 47702837,
+      "sha256": "610e5436614547a89a8aaeac3fe5672730ffb73c8ad0ebc4256e233da46525d8"
+    }
+  ]
+}
