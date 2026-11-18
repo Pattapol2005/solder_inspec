@@ -26,7 +26,7 @@ class FeatureFrame:
 
 class FrameRegistration:
     def __init__(self, image):
-        self.anchor=FeatureFrame(image)
+        self.anchor=image if isinstance(image,FeatureFrame) else FeatureFrame(image)
         self.bank=[(self.anchor,np.eye(3))]
         self.last=None
         self.detail='พร้อมติดตามตำแหน่ง'

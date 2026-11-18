@@ -389,6 +389,18 @@ class BoardExportTests(unittest.TestCase):
                 with self.assertRaises(ValueError):export_board(ledger.session,root/'completed')
             self.assertFalse((root/'completed').exists())
 
+    def test_missing_reference_is_named_before_any_board_files_are_copied(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);ledger=self.completed(root)
+            missing=root/'missing'/'reference.png'
+            ledger.session['calibration_profiles']={'U1':dict(kind='U1',image=str(missing))}
+            before=copy.deepcopy(ledger.session)
+            with self.assertRaisesRegex(ValueError,'U1') as caught:
+                export_board(ledger.session,root/'completed')
+            self.assertIn(str(missing),str(caught.exception))
+            self.assertFalse((root/'completed').exists())
+            self.assertEqual(before,ledger.session)
+
     def test_locked_physical_pass_keeps_its_evidence_but_failed_pin_can_recover(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);ledger=BoardChecklist(root/'boards');ledger.lock_pass=True

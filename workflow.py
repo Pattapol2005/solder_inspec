@@ -11,6 +11,7 @@ from board_export import inspected_component,scanned_component,export_board
 from calibration_tools import PointCalibrationWindow
 from pin_calibration import read_calibrations,save_calibration,refine_pin_points
 from inspection import read_image
+from calibration_files import load_calibration_profile
 
 
 class WorkflowMixin:
@@ -148,7 +149,7 @@ class WorkflowMixin:
             state=item.get('status','PENDING') if physical else 'REVIEW'
             rows.append((pin,state,bool(item.get('confirmed',False) and physical)))
         calibration=self.pin_calibrations.get(name)
-        located=calibration is not None and calibration.tracker.last is not None
+        located=calibration is not None and (getattr(calibration,'last_registration',None) is not None or calibration.tracker.last is not None)
         candidates=self.ic_observations.get(name,[]) if not located else []
         candidate_signature=tuple((d['class_id'],round(d['confidence'],2)) for d in candidates)
         hint=('ตั้งขา 1 ในตั้งค่าโปรแกรม > ขา IC / ไดโอด' if calibration is None else calibration.detail)
@@ -216,9 +217,12 @@ class WorkflowMixin:
         snapshot=copy.deepcopy(self.checklist.session)
         signature=self.board_signature()
         profiles={}
-        for kind in ('U1','U4','diode'):
-            path=self.calibration_root/kind/'active.json'
-            if path.is_file():profiles[kind]=json.loads(path.read_text(encoding='utf-8'))
+        try:
+            for kind in ('U1','U4','diode'):
+                path=self.calibration_root/kind/'active.json'
+                if path.is_file():profiles[kind]=load_calibration_profile(path)
+        except (ValueError,OSError,KeyError,TypeError) as exc:
+            self.info.set('บันทึกบอร์ดไม่สำเร็จ: '+str(exc));return
         snapshot['calibration_profiles']=profiles
         snapshot['confidence_settings']=dict(self.preferences)
         self.board_saving=True;self.cancel_scan();self.refresh_checklist()

@@ -3,16 +3,23 @@ import cv2
 import numpy as np
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
+from time import monotonic as missing_clock
 
-from inspection import quality_detections, draw_detection, draw_pin_number,detection_polygon,hidden_by_missing
+from inspection import quality_detections, draw_detection, draw_pin_number,detection_polygon,hidden_by_missing,draw_pending_missing
 from scanner import inspect_target, observed_pin_boxes, save_auto_report,ScanTarget,Registration
 from board import COMPONENTS
 from frame_registration import FeatureFrame
 from diode_cv import assess_diode,combine_diode_result,inspect_diode,draw_diode,FixedDiodeROI
 from runtime import inference_options
 from locator_markers import diode_marker_reference,assigned_markers
+from pin_recovery import recover_from_head
 
 _reference_executor=ThreadPoolExecutor(max_workers=1,thread_name_prefix='board-reference')
+IC_MISSING_CONFIRM_SECONDS=.45
+
+
+def _missing_box_key(detection):
+    return np.float32(detection.polygon).tobytes()
 
 
 def defective_ic_targets(frame,hits,detections):
@@ -38,21 +45,24 @@ def defective_ic_targets(frame,hits,detections):
 
 
 def _calibrated_views(frame,pins,diode,cancel):
-    if cancel.is_set():return [],[],None
+    if cancel.is_set():return [],[],None,None
     features=FeatureFrame(frame)
     jobs=[];notes=[]
     for name,calibration in (pins or {}).items():
-        if cancel.is_set():return [],[],None
+        if cancel.is_set():return [],[],None,None
         reg=calibration.locate(features)
         if reg is not None:jobs.append((reg,calibration))
         notes.append(name+': '+calibration.detail)
     axis=diode.axis(features) if diode is not None and not cancel.is_set() else None
-    return jobs,notes,axis
+    return jobs,notes,axis,features
 
 
 def inspect_live_frame(frame, locator, model, class_map, threshold, locator_threshold,
                        device, model_path, board_id, ledger, evidence_cache, report_root, cancel,
-                       pin_calibrations=None,diode_direction=None):
+                       pin_calibrations=None,diode_direction=None,ic_missing_since=None):
+    observed_at=missing_clock()
+    missing_since=dict(ic_missing_since or {})
+    seen_missing=set();pending_missing={};pending_missing_boxes={}
     options=inference_options(device)
     locked={name for name,item in ledger.items() if item.get('status')=='PASS' and item.get('complete') and
             (not name.startswith('D') or item.get('diode_polarity_state')=='PASS')}
@@ -73,16 +83,6 @@ def inspect_live_frame(frame, locator, model, class_map, threshold, locator_thre
         if reference_future is not None:reference_future.cancel()
         return None
     annotated=frame.copy()
-    missing_quads=[detection_polygon(d) for d in detections if d.class_id==3]
-    # Draw every accepted model proposal, including ambiguous/partial locators.
-    # Checklist eligibility is handled separately from what the viewer displays.
-    for hit in locator.hits:
-        if hidden_by_missing(hit.quad,missing_quads):continue
-        cv2.polylines(annotated,[np.int32(hit.quad)],True,(255,210,80),2)
-        x,y=np.maximum(0,np.min(hit.quad,axis=0)).astype(int)
-        cv2.putText(annotated,f'{hit.component} {hit.confidence:.2f}',(x,max(20,y-5)),
-                    cv2.FONT_HERSHEY_SIMPLEX,.6,(255,210,80),2)
-    for detection in detections:draw_detection(annotated,detection)
     targets=locator.targets(frame,registration,ledger,include_completed=True) if registration is not None else []
     targets=[t for t in targets if t.component not in ('U1','U4') and t.component not in locked]
     jobs=[(target,registration,locator) for target in targets]
@@ -95,7 +95,15 @@ def inspect_live_frame(frame, locator, model, class_map, threshold, locator_thre
         if target.component in missing_names and target.component not in locked:
             targets.append(target);jobs.append((target,defect_registration,locator))
     pin_overlays=[];diode_overlays=[];calibration_notes=[]
-    pin_jobs,calibration_notes,diode_axis=reference_future.result() if reference_future is not None else ([],[],None)
+    pin_jobs,calibration_notes,diode_axis,features=reference_future.result() if reference_future is not None else ([],[],None,None)
+    located={reference.component for _,reference in pin_jobs}
+    for name,reference in pin_calibrations.items():
+        if name in located or features is None or cancel.is_set():continue
+        recovered=recover_from_head(reference,features,locator.hits,markers,detections,locator)
+        calibration_notes=[note for note in calibration_notes if not note.startswith(name+':')]
+        calibration_notes.append(name+': '+reference.detail)
+        if recovered is not None:
+            pin_jobs.append((recovered,reference))
     observed_by_component={}
     if not hasattr(locator,'diode_roi'):locator.diode_roi=FixedDiodeROI()
     proposals=[np.float32(d.polygon) for d in detections] if pin_jobs else []
@@ -109,6 +117,14 @@ def inspect_live_frame(frame, locator, model, class_map, threshold, locator_thre
         for pin,quad in target.pad_polygons.items():
             if pin in measured and coverage.get(str(pin),{}).get('status')=='PASS' and coverage[str(pin)].get('confirmed'):
                 pin_overlays.append(dict(component=target.component,pin=pin,quad=measured[pin].tolist(),state='PASS'))
+        missing_on_pads=any(d.class_id==3 and any(cv2.intersectConvexConvex(
+            np.float32(d.polygon),np.float32(pad))[0]>1 for pad in target.pad_polygons.values()) for d in detections)
+        if reference.component not in locked and missing_on_pads:
+            # A partial IC may have only previously passed pins in this view.
+            # Still time a whole-part missing candidate without discarding those
+            # saved pin results before the confirmation interval has elapsed.
+            jobs.append((target,reg,reference));targets.append(target)
+            continue
         pending=[pin for pin in target.joints if not (coverage.get(str(pin),{}).get('status')=='PASS' and coverage[str(pin)].get('confirmed'))]
         if pending:
             target=replace(target,joints=pending,pad_polygons={p:target.pad_polygons[p] for p in pending})
@@ -137,6 +153,25 @@ def inspect_live_frame(frame, locator, model, class_map, threshold, locator_thre
         pending_boxes={pin:measured[pin] for pin in target.joints if pin in measured}
         result,crop=inspect_target(model,class_map,frame,target,reg,threshold,device,
                                    model_path,board_id,reference,frame_detections=detections,observed=pending_boxes)
+        if result[5].get('component_missing'):
+            name=target.component
+            seen_missing.add(name)
+            since=missing_since.setdefault(name,observed_at)
+            elapsed=max(0.,observed_at-since)
+            if elapsed < IC_MISSING_CONFIRM_SECONDS-1e-9:
+                pending_missing[name]=elapsed
+                for detection in result[2]:
+                    if detection.class_id==3:
+                        pending_boxes_key=_missing_box_key(detection)
+                        pending_missing_box=dict(component=name,quad=detection.polygon,elapsed=elapsed,required=IC_MISSING_CONFIRM_SECONDS)
+                        pending_missing_boxes[pending_boxes_key]=pending_missing_box
+                calibration_notes.append(f'{name}: รอยืนยัน missing {elapsed:.2f}/{IC_MISSING_CONFIRM_SECONDS:.2f} วินาที')
+                # Keep the previous pin/board result intact. Independent solder
+                # defects are still processed immediately while missing waits.
+                if not any(d.class_id in (1,2) for d in result[2]):continue
+                confirmed=[d for d in detections if d.class_id!=3 or _missing_box_key(d) not in pending_missing_boxes]
+                result,crop=inspect_target(model,class_map,frame,target,reg,threshold,device,
+                    model_path,board_id,reference,frame_detections=confirmed,observed=pending_boxes)
         result[5].update(locator_threshold=locator_threshold,continuous=True,
                          inspection_input='full_camera_frame')
         if target.component.startswith('D'):
@@ -158,12 +193,10 @@ def inspect_live_frame(frame, locator, model, class_map, threshold, locator_thre
                                           if diode_direction is not None else None)
             result=combine_diode_result(result,polarity)
             item=dict(component=target.component,quad=target.quad.tolist(),**polarity);diode_overlays.append(item)
-            draw_diode(annotated,item)
         if result[5]['physical_pin_numbers']:
             for pin,quad in pending_boxes.items():
                 state=result[5]['joint_states'][pin]
                 pin_overlays.append(dict(component=target.component,pin=pin,quad=quad.tolist(),state=state))
-                draw_pin_number(annotated,target.component,pin,quad,(80,220,240))
                 draw_pin_number(result[1],target.component,pin,quad,(80,220,240))
         key=(target.component,result[3],tuple(sorted(d.class_id for d in result[2])),
              tuple(sorted(result[5]['joint_states'].items())),threshold,locator_threshold,
@@ -194,11 +227,30 @@ def inspect_live_frame(frame, locator, model, class_map, threshold, locator_thre
         if marker_ref is not None:observed['polarity_reference']=marker_ref
         if not eligible:observed['reason']='กรอบไม่ครบหรือชื่อซ้ำ · '+observed['reason']
         item=dict(component=hit.component,quad=hit.quad.tolist(),locked=is_locked,allow_printed_reference=eligible,**observed)
-        diode_overlays.append(item);draw_diode(annotated,item)
+        diode_overlays.append(item)
         assessed.add(hit.component)
+    missing_since={name:since for name,since in missing_since.items() if name in seen_missing}
+    detections=[d for d in detections if d.class_id!=3 or _missing_box_key(d) not in pending_missing_boxes]
+    for name,candidates in ic_observations.items():
+        ic_observations[name]=[item for item in candidates if item['class_id']!=3 or
+                               np.float32(item['quad']).tobytes() not in pending_missing_boxes]
+    missing_quads=[detection_polygon(d) for d in detections if d.class_id==3]
+    for hit in locator.hits:
+        if hidden_by_missing(hit.quad,missing_quads):continue
+        cv2.polylines(annotated,[np.int32(hit.quad)],True,(255,210,80),2)
+        x,y=np.maximum(0,np.min(hit.quad,axis=0)).astype(int)
+        cv2.putText(annotated,f'{hit.component} {hit.confidence:.2f}',(x,max(20,y-5)),cv2.FONT_HERSHEY_SIMPLEX,.6,(255,210,80),2)
+    for detection in detections:draw_detection(annotated,detection)
+    for item in pending_missing_boxes.values():draw_pending_missing(annotated,item)
+    for item in pin_overlays:
+        if hidden_by_missing(item['quad'],missing_quads):continue
+        draw_pin_number(annotated,item['component'],item['pin'],item['quad'],(80,220,240))
+    for item in diode_overlays:draw_diode(annotated,item)
     return dict(locator=locator,registration=registration,targets=targets,reports=reports,
                 locator_hits=list(locator.hits),raw=frame,annotated=annotated,detections=detections,
                 pin_overlays=pin_overlays,diode_overlays=diode_overlays,calibration_notes=calibration_notes,
                 locked_components=sorted({h.component for h in locator.hits}&locked),ic_observations=ic_observations,
+                ic_missing_since=missing_since,pending_ic_missing=pending_missing,
+                pending_missing_boxes=list(pending_missing_boxes.values()),
                 marker_hits=markers,ic_head_markers={name:[m.quad.tolist() for m in assigned_markers(locator.hits,markers,name) if m.component=='ic_head']
                                                    for name in detected_ics})

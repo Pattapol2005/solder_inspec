@@ -3,7 +3,7 @@ import time
 import cv2
 import numpy as np
 
-from inspection import draw_detection,detection_from_quad,draw_pin_number,visible_detections,detection_polygon,hidden_by_missing
+from inspection import draw_detection,detection_from_quad,draw_pin_number,visible_detections,detection_polygon,hidden_by_missing,draw_pending_missing
 from scanner import transform
 from diode_cv import inspect_diode,draw_diode
 
@@ -76,6 +76,8 @@ class LiveOverlay:
             if containing and all(n in payload.get('locked_components',[]) for n in containing):continue
             points=transform(np.float32(d.polygon),matrix)
             draw_detection(image,detection_from_quad(points,d.class_id,d.confidence,d.native_class_id,d.native_class_name))
+        for item in payload.get('pending_missing_boxes',[]):
+            draw_pending_missing(image,dict(item,quad=transform(np.float32(item['quad']),matrix)))
         for item in payload.get('pin_overlays',[]):
             if hidden_by_missing(item['quad'],missing_quads):continue
             quad=transform(np.float32(item['quad']),matrix)

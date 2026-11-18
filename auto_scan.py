@@ -15,7 +15,7 @@ from positioning import PositionLocator
 from trained_locator import TrainedLocator
 from ui import COLORS
 from preferences import confidence_value
-from live_scan import inspect_live_frame
+from live_scan import inspect_live_frame,IC_MISSING_CONFIRM_SECONDS
 from inspection import decision
 from live_overlay import LiveOverlay
 
@@ -40,6 +40,7 @@ class AutoScanMixin:
         self.scan_timer=None
         self.live_preview=None
         self.live_evidence_cache={}
+        self.ic_missing_since={}
         self.last_submitted_sequence=None
         self.latest_camera_sequence=None
         self.latest_camera_at=0
@@ -47,6 +48,7 @@ class AutoScanMixin:
         self.video_sequence=None;self.preview_frames=0;self.preview_epoch=time.monotonic();self.preview_fps=0.
 
     def cancel_scan(self):
+        self.ic_missing_since.clear()
         self.scan_cancel.set()
         self.scan_generation+=1
         self.auto_targets=[]
@@ -146,6 +148,7 @@ class AutoScanMixin:
         stage=self.checklist.frame_snapshot()
         ledger=stage.session['results']
         cache=dict(self.live_evidence_cache)
+        missing_since=dict(self.ic_missing_since)
         locator=self.locator
         locator_model=self.locator_model;locator_map=dict(self.locator_class_map)
         locator_file=self.locator_file;device=self.device
@@ -157,12 +160,13 @@ class AutoScanMixin:
         def run():
             current=locator or TrainedLocator(locator_model,locator_map,locator_file,device,locator_threshold)
             payload=inspect_live_frame(frame,current,model,mapping,threshold,locator_threshold,device,
-                                      model_path,board_id,ledger,cache,report_root,cancel,pins,diode)
+                                      model_path,board_id,ledger,cache,report_root,cancel,pins,diode,missing_since)
             if payload is not None and not cancel.is_set():
                 payload['staged_file']=stage.prepare_frame(payload['reports'])
             return payload
         def failed(exc):
             if generation!=self.scan_generation:return
+            self.ic_missing_since.clear()
             self.scan_status.set('ตรวจภาพไม่สำเร็จ: '+str(exc))
             self.scan_after=time.monotonic()+1
         def done(payload):
@@ -176,6 +180,7 @@ class AutoScanMixin:
             finally:
                 if staged_file is not None:staged_file.cleanup()
             self.locator=payload['locator']
+            self.ic_missing_since=payload.get('ic_missing_since',{})
             self.position_hits=list(payload.get('locator_hits',[]))
             self.ic_observations=payload.get('ic_observations',{})
             self.ic_observation_frame=payload['raw']
@@ -211,6 +216,10 @@ class AutoScanMixin:
                     state='LOCATED' if self.position_hits else 'SCANNING'
                     detail='ระบุตำแหน่งเท่านั้น · ยังไม่มีผลตรวจคุณภาพ' if position_only else 'รอ best_inspec.pt'
                 else:detail='ผลภาพล่าสุด · ยังไม่ยืนยันอุปกรณ์ในเช็กลิสต์'
+                if payload.get('pending_ic_missing'):
+                    state='REVIEW'
+                    detail=' · '.join(f'{name}: รอยืนยัน missing {elapsed:.2f}/{IC_MISSING_CONFIRM_SECONDS:.2f} วินาที'
+                                      for name,elapsed in payload['pending_ic_missing'].items())
                 locked=payload.get('locked_components',[])
                 if locked and len(locked)==len({h.component for h in self.position_hits}):
                     state='PASS';detail=', '.join(locked)+' · ผ่านและล็อกผลแล้ว'
@@ -225,6 +234,8 @@ class AutoScanMixin:
                 self.table.insert('','end',values=(THAI[d.class_id],f'{d.confidence:.0%}'),tags=('good' if d.class_id==0 else 'defect',))
             for i,value in enumerate(self.counts):value.set(str(sum(d.class_id==i for d in detections)))
             self.scan_status.set('ตรวจต่อเนื่อง · ผลภาพล่าสุด · '+str(len(self.position_hits))+' กรอบอุปกรณ์ / '+str(len(detections))+' รอยบัดกรี')
+            if payload.get('pending_ic_missing'):
+                self.scan_status.set(self.scan_status.get()+' · '+', '.join(payload['pending_ic_missing'])+f' รอยืนยัน missing {IC_MISSING_CONFIRM_SECONDS:.2f} วินาที')
             self.latency.set(f'ภาพ {self.preview_fps:.0f} FPS · AI {(time.perf_counter()-started)*1000:,.0f} ms')
             self.display_frame=(self.live_preview[1] if self.overlay.get() else self.live_preview[0]) if self.frozen else self.frame
             if self.display_frame is None:self.display_frame=payload['raw']

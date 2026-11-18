@@ -59,6 +59,16 @@ class TrainedLocator:
             observed.setdefault(name,[]).append(hit)
         grouped={};pending={}
         for name,hits in observed.items():
+            if name in ('U1','U4'):
+                unique=[]
+                for hit in sorted(hits,key=lambda item:item.confidence,reverse=True):
+                    duplicate=False
+                    for other in unique:
+                        area=min(cv2.contourArea(np.float32(hit.quad)),cv2.contourArea(np.float32(other.quad)))
+                        overlap=cv2.intersectConvexConvex(np.float32(hit.quad),np.float32(other.quad))[0]
+                        if area>0 and overlap/area>.85:duplicate=True;break
+                    if not duplicate:unique.append(hit)
+                hits=unique
             primary=max(hits,key=lambda hit:hit.confidence)
             previous=self.pending.get(name)
             since=now

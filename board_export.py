@@ -46,6 +46,11 @@ def export_board(session,root):
     records=session['results']
     pending=[name for name in COMPONENTS if not scanned_component(name,records.get(name))]
     if pending:raise ValueError('ยังสแกนไม่ครบทุกอุปกรณ์: '+', '.join(pending))
+    # Validate references before copying the board's potentially large evidence.
+    for kind,profile in session.get('calibration_profiles',{}).items():
+        if kind not in ('U1','U4','diode'):raise ValueError('ไม่รู้จักชนิดอ้างอิงในรายงานบอร์ด')
+        source=Path(profile['image'])
+        if not source.is_file():raise ValueError(f'ไม่พบภาพอ้างอิง {kind}: {source}')
     root=Path(root).resolve();root.mkdir(parents=True,exist_ok=True)
     stamp=datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     slug=re.sub(r'[<>:"/\\|?*\x00-\x1f]','_',number).strip(' .')[:48] or 'unnumbered'
@@ -69,7 +74,9 @@ def export_board(session,root):
         source=Path(profile['image'])
         target=Path('calibrations')/kind/'reference.png'
         (staging/target).parent.mkdir(parents=True,exist_ok=True)
-        shutil.copy2(source,staging/target)
+        try:shutil.copy2(source,staging/target)
+        except OSError as exc:
+            raise OSError(f'คัดลอกภาพอ้างอิง {kind} ไม่สำเร็จ: {source} -> {staging/target}: {exc}') from exc
         profile['image']=target.as_posix()
         (staging/target.parent/'calibration.json').write_text(json.dumps(profile,ensure_ascii=False,indent=2),encoding='utf-8')
     overall='FAIL' if any(e['status']=='FAIL' for e in records.values()) else (

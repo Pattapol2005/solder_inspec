@@ -9,6 +9,7 @@ import numpy as np
 from inspection import read_image,write_image
 from scanner import Registration,ScanTarget,pad_boxes,corners,transform,observed_pin_boxes
 from frame_registration import FrameRegistration
+from calibration_files import load_calibration_profile
 
 TOTAL_PINS={'U1':14,'U4':28}
 
@@ -24,6 +25,7 @@ def align_pin_row(pads, pins, proposals):
     depth = np.ptp(pads[pins[0]] @ normal)
     positions = []
     for poly in proposals:
+        poly=np.float32(poly)
         delta = poly.mean(axis=0) - origin
         along = float(delta @ axis / pitch)
         if not -.7 <= along <= len(pins)-.3:continue
@@ -82,6 +84,7 @@ class PinCalibration:
     def __init__(self,component,image,points,path):
         self.component=component;self.total=TOTAL_PINS[component]
         self.path=Path(path)
+        self.reference_image=image.copy()
         self.fingerprint=hashlib.sha256(image.tobytes()).hexdigest()
         points=np.float32(points).reshape(3,2)
         pitch=points[1]-points[0];across=points[2]-points[0]
@@ -95,15 +98,24 @@ class PinCalibration:
         source=np.float32([corners(boxes[i]).mean(axis=0) for i in (1,2,self.total)])
         self.board_to_anchor=np.vstack((cv2.getAffineTransform(source,points),[0,0,1]))
         self.tracker=FrameRegistration(image)
+        self.recovery_tracker=None;self.recovery_pose=None;self.last_registration=None
         self.row_pitch={}
         self.points=points.tolist();self.detail='พร้อมตรวจ '+component+' รายขาจริง'
 
     def locate(self,features):
         match=self.tracker.locate(features)
         self.detail=self.tracker.detail
-        if match is None:return None
-        return Registration(match.matrix@self.board_to_anchor,match.inliers,match.ratio,match.error,
+        pose=self.board_to_anchor
+        if match is None and self.recovery_tracker is not None:
+            match=self.recovery_tracker.locate(features)
+            pose=self.recovery_pose
+            self.detail='อ้างอิง ic_head · '+self.recovery_tracker.detail
+        if match is None:
+            self.last_registration=None
+            return None
+        self.last_registration=Registration(match.matrix@pose,match.inliers,match.ratio,match.error,
                             method='ic_pin_reference',anchors=[{'component':self.component,'pins':[1,2,self.total]}])
+        return self.last_registration
 
     def target(self,frame,registration,proposals=()):
         h,w=frame.shape[:2];pads={}
@@ -149,13 +161,15 @@ def save_calibration(root,kind,image,points,extra=None):
         if not np.isfinite(p).all() or np.linalg.norm(p[1]-p[0])<15:raise ValueError('กำหนดขั้ว + และขั้ว - ให้ห่างกันอย่างน้อย 15 px')
     else:raise ValueError('ไม่รู้จักชนิดการตั้งอ้างอิง')
     write_image(image_path,image)
-    data=dict(kind=kind,points=np.asarray(points).tolist(),image=str(image_path.resolve()))
+    data=dict(kind=kind,points=np.asarray(points).tolist(),image='reference.png',
+              image_sha256=hashlib.sha256(image_path.read_bytes()).hexdigest())
     if kind in TOTAL_PINS:data['total_pins']=TOTAL_PINS[kind]
     if extra:data.update(extra)
     (folder/'calibration.json').write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8')
     active=Path(root)/kind/'active.json';temp=active.with_suffix('.tmp')
-    temp.write_text(json.dumps(data,ensure_ascii=False,indent=2),encoding='utf-8');temp.replace(active)
-    return data
+    active_data=dict(data,image=(Path(folder.name)/'reference.png').as_posix())
+    temp.write_text(json.dumps(active_data,ensure_ascii=False,indent=2),encoding='utf-8');temp.replace(active)
+    return dict(data,image=str(image_path.resolve()))
 
 
 def read_calibrations(root):
@@ -164,7 +178,7 @@ def read_calibrations(root):
         active=Path(root)/kind/'active.json'
         if not active.is_file():continue
         try:
-            data=json.loads(active.read_text(encoding='utf-8'))
+            data=load_calibration_profile(active)
             if kind in TOTAL_PINS and data.get('total_pins',16 if kind=='U1' else 28)!=TOTAL_PINS[kind]:
                 raise ValueError('จำนวนขาอ้างอิงเดิมไม่ตรง ต้องตั้งขา 1 ใหม่')
             image=read_image(data['image'])

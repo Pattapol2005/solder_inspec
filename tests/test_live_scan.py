@@ -238,6 +238,31 @@ class LiveScanTests(unittest.TestCase):
         self.assertLess(read_evidence(self.app.report_path,pin).shape[1],frame.shape[1])
         self.assertTrue(self.app.live_overlay.payload['pin_overlays'])
 
+    def test_head_and_two_lead_rows_recover_a_saved_calibration_in_the_live_pipeline(self):
+        from test_pin_recovery import PinRecoveryTests
+        calibration,frame,hits,markers,detections,locator,expected=PinRecoveryTests().fixture()
+        from frame_registration import FeatureFrame
+        self.assertIsNone(calibration.locate(FeatureFrame(frame)))
+        self.app.pin_calibrations={'U1':calibration}
+        self.app.locator_class_map={0:'U1',1:'ic_head'}
+        q=hits[0].quad
+        current=obb_result([q,q+np.float32([[10,10],[-10,10],[-10,-10],[10,-10]]),markers[0].quad],[0,0,1],[.97,.85,.96])
+        reference=locator.model.predict()[0].obb.xyxyxyxy.data[0]
+        def predict(**kwargs):
+            return [obb_result([reference],[1],[.9]) if kwargs['source'] is calibration.reference_image else current]
+        self.app.locator_model.predict=predict
+        self.quality_result=obb_result([d.polygon for d in detections],[2]*len(detections),[.95]*len(detections),NAMES)
+        self.frame=frame;self.app.frame=self.app.display_frame=frame
+        self.inspect()
+        entry=self.app.checklist.session['results']['U1']
+        confirmed={int(pin) for pin,item in entry['coverage'].items() if item['confirmed']}
+        self.assertEqual(confirmed,set(expected))
+        self.assertEqual(entry['confirmed_by'],'calibrated_ic_pin_reference')
+        self.assertFalse(entry['complete'])
+        self.assertEqual(len(self.app.position_hits),1)
+        self.assertTrue(self.app.live_overlay.payload['pin_overlays'])
+        self.assertFalse(any(pin.startswith('candidate:') for pin in self.app.pin_table.get_children()))
+
     def test_partial_ic_without_anchor_shows_solder_proposals_but_does_not_invent_pin_numbers(self):
         self.app.locator_class_map={0:'U4'}
         self.locator_result=obb_result([[[0,20],[180,20],[180,100],[0,100]]],[0],[.99])
@@ -249,7 +274,7 @@ class LiveScanTests(unittest.TestCase):
         self.assertNotIn('U4',self.app.checklist.session['results'])
         self.assertIn('ตั้งขา 1',self.app.pin_progress.get())
 
-    def test_one_missing_ic_bank_marks_the_whole_part_without_pin_calibration(self):
+    def test_one_missing_ic_bank_marks_the_whole_part_after_045_seconds(self):
         from board_export import inspected_component
         from ic_evidence import bank_reports
         for name in ('U1','U4'):
@@ -261,7 +286,16 @@ class LiveScanTests(unittest.TestCase):
                 self.quality_result=obb_result([
                     [[15,140],[285,140],[285,190],[15,190]],
                     [[20,25],[40,25],[40,60],[20,60]]],[3,2],[.93,.95],NAMES)
-                self.inspect()
+                with patch('live_scan.missing_clock',side_effect=[10.,10.449,10.45]):
+                    self.inspect()
+                    self.assertNotIn(name,self.app.checklist.session['results'])
+                    self.assertEqual(self.app.status.get(),'REVIEW')
+                    self.assertIn(name,self.app.live_overlay.payload['pending_ic_missing'])
+                    self.assertTrue(self.app.live_overlay.payload['pending_missing_boxes'])
+                    self.assertNotIn(3,[d.class_id for d in self.app.live_overlay.payload['detections']])
+                    self.inspect()
+                    self.assertNotIn(name,self.app.checklist.session['results'])
+                    self.inspect()
                 entry=self.app.checklist.session['results'][name]
                 self.assertEqual(entry['status'],'FAIL')
                 self.assertTrue(entry['component_missing'])
@@ -325,12 +359,108 @@ class LiveScanTests(unittest.TestCase):
         q=[[10,10],[290,10],[290,190],[10,190]]
         self.locator_result=obb_result([q,q],[0,1],[.99,.80])
         self.quality_result=obb_result([[[15,140],[285,140],[285,180],[15,180]]],[3],[.95],NAMES)
-        self.inspect()
+        with patch('live_scan.missing_clock',side_effect=[10.,10.45]):
+            self.inspect()
+            self.assertNotIn('U4',self.app.checklist.session['results'])
+            self.inspect()
         self.assertTrue(self.app.checklist.session['results']['U4']['component_missing'])
+
+    def test_transient_ic_missing_restarts_the_timer_when_the_pins_reappear(self):
+        self.app.locator_class_map={0:'U1'}
+        self.locator_result=obb_result([[[0,0],[299,0],[299,199],[0,199]]],[0],[.99])
+        missing=obb_result([[[15,140],[285,140],[285,190],[15,190]]],[3],[.95],NAMES)
+        good=obb_result([[[20,25],[40,25],[40,60],[20,60]]],[2],[.95],NAMES)
+        with patch('live_scan.missing_clock',side_effect=[10.,10.3,10.44,10.7,10.89]):
+            self.quality_result=missing;self.inspect()
+            self.quality_result=good;self.inspect()
+            self.assertEqual(self.app.ic_missing_since,{})
+            self.quality_result=missing;self.inspect();self.inspect()
+            self.assertNotIn('U1',self.app.checklist.session['results'])
+            self.inspect()
+        self.assertTrue(self.app.checklist.session['results']['U1']['component_missing'])
+
+    def test_ic_missing_timer_is_cleared_when_the_locator_disappears_or_settings_change(self):
+        self.app.locator_class_map={0:'U1'}
+        hit=obb_result([[[0,0],[299,0],[299,199],[0,199]]],[0],[.99])
+        self.locator_result=hit
+        self.quality_result=obb_result([[[15,140],[285,140],[285,190],[15,190]]],[3],[.95],NAMES)
+        with patch('live_scan.missing_clock',side_effect=[10.,10.2,10.5,11.,12.,13.]):
+            self.inspect()
+            self.locator_result=obb_result([],[],[]);self.inspect()
+            self.assertEqual(self.app.ic_missing_since,{})
+            self.locator_result=hit;self.inspect()
+            self.assertNotIn('U1',self.app.checklist.session['results'])
+            self.app.threshold.set('0.4')
+            self.assertEqual(self.app.ic_missing_since,{})
+            self.inspect()
+            self.app.reset_board_inspection()
+            self.assertEqual(self.app.ic_missing_since,{})
+            self.inspect()
+            self.app.disconnect()
+            self.assertEqual(self.app.ic_missing_since,{})
+            self.inspect()
+        self.assertNotIn('U1',self.app.checklist.session['results'])
+
+    def test_ic_missing_timers_are_independent_for_u1_and_u4(self):
+        self.app.locator_class_map={0:'U1',1:'U4'}
+        self.locator_result=obb_result([
+            [[0,0],[140,0],[140,199],[0,199]],[[160,0],[299,0],[299,199],[160,199]]],[0,1],[.99,.99])
+        left=[[10,130],[130,130],[130,180],[10,180]]
+        right=[[170,130],[290,130],[290,180],[170,180]]
+        with patch('live_scan.missing_clock',side_effect=[10.,10.2,10.45,10.65]):
+            self.quality_result=obb_result([left],[3],[.95],NAMES);self.inspect()
+            self.quality_result=obb_result([left,right],[3,3],[.95,.95],NAMES);self.inspect()
+            self.inspect()
+            self.assertTrue(self.app.checklist.session['results']['U1']['component_missing'])
+            self.assertNotIn('U4',self.app.checklist.session['results'])
+            self.inspect()
+        self.assertTrue(self.app.checklist.session['results']['U4']['component_missing'])
+
+    def test_bridge_does_not_wait_for_an_ic_missing_candidate(self):
+        self.app.locator_class_map={0:'U1'}
+        self.locator_result=obb_result([[[0,0],[299,0],[299,199],[0,199]]],[0],[.99])
+        self.quality_result=obb_result([
+            [[15,140],[285,140],[285,190],[15,190]],[[20,25],[60,25],[60,70],[20,70]]],[3,0],[.95,.95],NAMES)
+        with patch('live_scan.missing_clock',return_value=10.):self.inspect()
+        entry=self.app.checklist.session['results']['U1']
+        self.assertEqual(entry['status'],'FAIL')
+        self.assertFalse(entry.get('component_missing',False))
+        self.assertIn('bridge',entry['reason'])
+
+    def test_calibrated_missing_waits_even_without_an_ic_locator(self):
+        import copy
+        from pin_calibration import PinCalibration
+        from frame_registration import FeatureFrame
+        from test_pin_diode_workflow import texture
+        frame=texture(200,300)
+        calibration=PinCalibration('U1',frame,[[60,40],[60,100],[230,40]],self.folder/'pin_reference.png')
+        target=calibration.target(frame,calibration.locate(FeatureFrame(frame)))
+        self.app.pin_calibrations={'U1':calibration}
+        self.locator_result=obb_result([],[],[])
+        self.quality_result=obb_result([target.pad_polygons[p].tolist() for p in target.joints],
+                                      [2]*len(target.joints),[.95]*len(target.joints),NAMES)
+        self.frame=frame;self.app.frame=self.app.display_frame=frame
+        with patch('live_scan.missing_clock',return_value=9.):self.inspect()
+        previous=copy.deepcopy(self.app.checklist.session['results']['U1'])
+        quad=target.pad_polygons[target.joints[0]].tolist()
+        self.quality_result=obb_result([quad],[3],[.95],NAMES)
+        with patch('live_scan.missing_clock',side_effect=[10.,10.45]):
+            self.inspect()
+            self.assertEqual(self.app.checklist.session['results']['U1'],previous)
+            self.inspect()
+        self.assertTrue(self.app.checklist.session['results']['U1']['component_missing'])
 
     def test_completed_board_can_be_saved_with_evidence(self):
         self.app.board_number.set('PCB-001')
         from board import COMPONENTS
+        from pin_calibration import save_calibration
+        reference=np.random.default_rng(7).integers(0,255,(480,640,3),dtype=np.uint8)
+        save_calibration(self.app.calibration_root,'U1',reference,[[150,50],[150,160],[470,50]])
+        active=self.app.calibration_root/'U1'/'active.json'
+        profile=json.loads(active.read_text('utf-8'))
+        revision=Path(profile['image']).parent.name
+        profile['image']=rf'Z:\old-laptop\solder_inspec\calibrations\U1\{revision}\reference.png'
+        active.write_text(json.dumps(profile),encoding='utf-8')
         proof=self.folder/'proof';proof.mkdir();(proof/'result.json').write_text('{}')
         write_image(proof/'result.png',np.zeros((120,160,3),np.uint8))
         for name,data in COMPONENTS.items():
@@ -363,6 +493,7 @@ class LiveScanTests(unittest.TestCase):
         self.assertTrue((self.app.last_saved_board/'board.json').is_file())
         self.assertTrue((self.app.last_saved_board/'ic_pins.csv').is_file())
         saved=json.loads((self.app.last_saved_board/'board.json').read_text(encoding='utf-8'))
+        self.assertTrue((self.app.last_saved_board/saved['calibration_profiles']['U1']['image']).is_file())
         self.assertEqual(saved['board_number'],'PCB-001')
         self.assertEqual(saved['overall_status'],'FAIL')
         self.assertIn('bridge',saved['results']['U4']['failure_reason'])

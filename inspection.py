@@ -111,6 +111,15 @@ def draw_detection(image, detection):
                 (x1,max(20,y1-5)), cv2.FONT_HERSHEY_SIMPLEX, .5, color, 1)
 
 
+def draw_pending_missing(image, item):
+    quad=np.float32(item['quad'])
+    color=(30,180,240)
+    cv2.polylines(image,[np.int32(quad)],True,color,2)
+    x,y=np.maximum(0,quad.min(axis=0)).astype(int)
+    text=f"{item['component']}: missing? {item['elapsed']:.2f}/{item.get('required',.45):.2f}s"
+    cv2.putText(image,text,(x,max(20,y-5)),cv2.FONT_HERSHEY_SIMPLEX,.5,color,1,cv2.LINE_AA)
+
+
 def read_image(path):
     image = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_COLOR)
     if image is None:
