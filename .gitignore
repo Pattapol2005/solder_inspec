@@ -1,0 +1,11 @@
+.venv/
+.venv-train/
+.ipynb_checkpoints/
+__pycache__/
+data/
+logs/
+runs/
+models/
+tmp/
+*.pt
+settings.json

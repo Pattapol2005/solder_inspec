@@ -1,0 +1,14 @@
+{
+  "kind": "diode",
+  "points": [
+    [
+      264.0,
+      153.0
+    ],
+    [
+      472.0,
+      150.0
+    ]
+  ],
+  "image": "D:\\Download\\solder_inspec\\calibrations\\diode\\20261112_152733_980191\\reference.png"
+}

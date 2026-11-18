@@ -1,0 +1,34 @@
+{
+  "kind": "U4",
+  "points": [
+    [
+      460.0,
+      27.0
+    ],
+    [
+      409.0,
+      28.0
+    ],
+    [
+      461.0,
+      426.0
+    ]
+  ],
+  "image": "D:\\Download\\solder_inspec\\calibrations\\U4\\20261115_154804_128615\\reference.png",
+  "total_pins": 28,
+  "operator_points": [
+    [
+      460.0,
+      27.0
+    ],
+    [
+      409.0,
+      28.0
+    ],
+    [
+      461.0,
+      426.0
+    ]
+  ],
+  "pitch_refinement_matches": 0
+}
